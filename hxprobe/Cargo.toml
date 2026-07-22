@@ -1,0 +1,15 @@
+[package]
+name = "hxprobe"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+memmap2 = "0.9"
+memchr = "2"
+# `bundled` compiles SQLite from source, so there is no dependency on whatever
+# libsqlite3 happens to be installed.
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+[profile.release]
+opt-level = 3
+lto = true

@@ -1,0 +1,9 @@
+# Never commit mail data. These are real messages.
+*.hxd
+*.db
+*.db-wal
+*.db-shm
+snapshots/
+
+target/
+.DS_Store
