@@ -25,6 +25,7 @@ use std::fs::File;
 use memmap2::Mmap;
 
 mod block;
+mod folder;
 mod header;
 mod lz;
 mod record;
@@ -207,12 +208,27 @@ fn cmd_db(path: &str, db_path: &str) {
     let offs = block::find_all(&mm);
     println!("{} blocks -> {db_path}", offs.len());
 
+    // Folder catalogs and membership metadata can occur after the messages.
+    let mut folders = folder::Index::default();
+    for &o in &offs {
+        if let Some(b) = block::parse(&mm, o) {
+            folders.observe(o, &b.data);
+        }
+    }
+
     for suffix in ["", "-wal", "-shm"] {
         let _ = std::fs::remove_file(format!("{db_path}{suffix}"));
     }
     let mut db = rusqlite::Connection::open(db_path).expect("open db");
     db.execute_batch(
         "PRAGMA journal_mode=WAL;
+         PRAGMA foreign_keys=ON;
+         CREATE TABLE folders (
+             id               INTEGER PRIMARY KEY, -- local store key
+             account_id       INTEGER NOT NULL,    -- local account key
+             name             TEXT,                -- NULL if revisions disagree
+             block            INTEGER NOT NULL
+         );
          CREATE TABLE messages (
              id           INTEGER PRIMARY KEY,
              block        INTEGER,   -- file offset of the source block
@@ -235,6 +251,12 @@ fn cmd_db(path: &str, db_path: &str) {
              -- conversation, because this record stores none of its own.
              subject_inherited INTEGER
          );
+         CREATE TABLE message_folders (
+             message_id INTEGER NOT NULL REFERENCES messages(id),
+             folder_id  INTEGER NOT NULL REFERENCES folders(id),
+             PRIMARY KEY (message_id, folder_id)
+         );
+         CREATE INDEX message_folders_folder ON message_folders(folder_id);
          CREATE INDEX messages_sent ON messages(sent_unix);
          CREATE INDEX messages_sender ON messages(sender);
          CREATE VIRTUAL TABLE messages_fts USING fts5(
@@ -255,9 +277,11 @@ fn cmd_db(path: &str, db_path: &str) {
     for &o in &offs {
         let Some(b) = block::parse(&mm, o) else { continue };
         blocks_ok += 1;
+        let folder_links = folders.links(&b.data, &needle);
 
         for loc in records(&b.data, &needle) {
             let mut r = record::parse(o, &b.data, loc.anchor);
+            r.folder_ids = folder_links.get(&loc.anchor).cloned().unwrap_or_default();
             let m = schema::build_bounded(&b.data, loc.anchor, loc.end, loc.back);
 
             // The named map is authoritative for every field it covers: it
@@ -366,8 +390,25 @@ fn cmd_db(path: &str, db_path: &str) {
     }
 
     let stored = best.len();
+    let with_folder = best.values().filter(|r| !r.folder_ids.is_empty()).count();
+    let multi_folder = best.values().filter(|r| r.folder_ids.len() > 1).count();
+    println!("  {} folders; {with_folder}/{stored} messages linked ({multi_folder} with multiple observed folders)", folders.folders.len());
     let tx = db.transaction().expect("tx");
     {
+        let mut ins_folder = tx
+            .prepare(
+                "INSERT INTO folders(id,account_id,name,block) VALUES (?1,?2,?3,?4)"
+            )
+            .expect("prepare folders");
+        for f in folders.folders.values() {
+            ins_folder.execute(rusqlite::params![f.id as i64, f.account_id as i64, f.name, f.block as i64])
+                .expect("insert folder");
+        }
+        let mut ins_link = tx
+            .prepare(
+                "INSERT INTO message_folders(message_id,folder_id) VALUES (?1,?2)"
+            )
+            .expect("prepare folder links");
         let mut ins = tx
             .prepare(
                 "INSERT INTO messages
@@ -396,6 +437,11 @@ fn cmd_db(path: &str, db_path: &str) {
                 r.subject_inherited as i64,
             ])
             .expect("insert");
+            let message_id = tx.last_insert_rowid();
+            for folder_id in &r.folder_ids {
+                ins_link.execute(rusqlite::params![message_id, *folder_id as i64])
+                    .expect("insert folder link");
+            }
         }
     }
     tx.commit().expect("commit");
@@ -427,6 +473,7 @@ fn cmd_db(path: &str, db_path: &str) {
 
 /// Combine a later revision of a message into the copy already held.
 fn merge(prev: &mut record::Record, r: record::Record) {
+    prev.folder_ids.extend(r.folder_ids);
     if prev.subject.is_none() {
         prev.subject = r.subject;
     }

@@ -629,6 +629,76 @@ splits into several parts is a name list, never a subject.
 
 ---
 
+### 6.3 Folder objects and membership *(Verified on a macOS version i snapshot)*
+
+Folder metadata is recoverable independently of message text. A serialized
+object has this envelope inside a checksum-verified, decompressed block:
+
+```text
++0  u16  5
++2  u16  serialization tag
++4  u32  length, including this 10-byte envelope
++8  u16  0
++10 ...  object
+```
+
+The object begins with a two-byte class and eight zero bytes. The observed
+folder envelope tag is `0x04c2`, class `0x004d`. Its typed reference stores:
+
+| Object offset | Meaning |
+|---|---|
+| +10 | local folder key, u64 |
+| +18 | reference kind, u32: 2 or 0x02ac for observed folder layouts |
+| +22 | local account key, u64 |
+| +30 | repeated folder key |
+| +38 | repeated account key |
+
+The display name is the final NUL-terminated UTF-16LE field, following a binary
+sort key with a single-byte NUL terminator. Decode UTF-16, including surrogate
+pairs; ASCII scans lose short and non-English names. Catalog entries are keyed
+by local ID, not name. These include virtual and internal folders. Conflicting
+names across cached revisions are left unresolved (SQL NULL).
+
+Two class-4 references at object offsets +160 and +360 identify the folder's
+view collection. Each repeats its collection key at reference offsets +10 and
++38. Class `0x004f` objects (envelope tag `0x0430`) contain cached message
+headers; their kind-4 owner reference at +22/+38 resolves through that collection
+to a folder. An anchor is linked only within its bounded object, and ambiguous
+objects with multiple anchors are rejected.
+
+Message bodies use class `0x00ca` (envelope tag `0x0740`). Its local message
+key repeats at +10, +30 and +38. Separately serialized class `0x00bf` metadata
+(tag `0x02c8`) repeats the same message key and ends in a 51-byte immutable
+message ID beginning `00 09 00 2e 00`, followed by an eight-byte local folder
+key. This joins compact message objects to folders. Expanded class-0xca objects
+inside transaction wrappers instead contain a typed class-0x4d folder reference
+at +408. Those headers are bounded by the next validated message object or
+serialized envelope and a 4096-byte maximum; only the first following ItemClass
+anchor is considered.
+These are checks of specific observed layouts, not a general object decoder.
+
+Validation on the September 25 snapshot:
+
+* 7,242 message object IDs had both metadata and expanded-reference folder
+  evidence, with no disagreement.
+* 23 remote folder IDs matched exact binary IDs in Osa GetFolder responses.
+* 3,875 message-folder observations in Osa GetMessageHeaderById responses
+  agreed with the recovered metadata links, with no mismatches. These are
+  comparisons against available logs, not a claim of full server coverage.
+* The export recovered 39 named folder objects and linked 23,321 of 23,375
+  exported messages. 54 remained unlinked; 514 had multiple observed folders
+  after the existing message-revision merge.
+
+The SQLite `folders` table stores local folder/account IDs, name and source
+block. `message_folders` stores all distinct observed links. They do not assert
+current server membership: the scanner includes cached revisions, and the
+existing sender/time deduplication can combine their evidence. A folder without
+exported messages is not necessarily empty on the server. Folder hierarchy,
+current-versus-stale selection, and additional serialization variants remain
+unmapped. No Osa logs are needed to run the exporter.
+
+---
+
 ## 7. Open questions
 
 * **`+0x20` in the block header**, covered by the header CRC, purpose unknown.
@@ -644,9 +714,11 @@ splits into several parts is a name list, never a subject.
 * **Recipients**, recovered from addresses inside the record span; the
   authoritative recipient table has not been located, so ordering and the
   To/Cc/Bcc distinction are unavailable.
-* **Folder / read state / flags**, not mapped. The Osa logs (§6.1) enumerate
-  the fields Outlook syncs (`FocusedClassification`, `HasAttachment`, `IsRead`,
-  `ConversationId`, …), which is the target list for further work.
+* **Folder hierarchy / current membership / read state / flags**, not mapped.
+  Folder names and observed membership are now exported (§6.3). The Osa logs
+  (§6.1) enumerate the fields Outlook syncs (`FocusedClassification`,
+  `HasAttachment`, `IsRead`, `ConversationId`, …), which is the target list
+  for further work.
 * **Page-level structure**, the page size (4096) and region offsets are known,
   but how pages are allocated and reclaimed is not.
 
