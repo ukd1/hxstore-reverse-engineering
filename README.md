@@ -78,6 +78,38 @@ sqlite3 mail.db "SELECT sent_utc, sender, subject
                  ORDER BY sent_unix DESC LIMIT 20;"
 ```
 
+### Folders
+
+The export includes `folders` (local folder/account keys, display name and
+source block) and `message_folders` (message-to-folder links). List the catalog,
+including folders with no recovered messages:
+
+```sql
+SELECT f.id, f.account_id, f.name, count(mf.message_id) AS messages
+FROM folders AS f
+LEFT JOIN message_folders AS mf ON mf.folder_id = f.id
+GROUP BY f.id
+ORDER BY messages DESC, f.name;
+```
+
+Read messages associated with a particular folder, using its ID from the list:
+
+```sql
+SELECT m.sent_utc, m.sender, m.subject, m.body
+FROM messages AS m
+JOIN message_folders AS mf ON mf.message_id = m.id
+WHERE mf.folder_id = 12345  -- replace with the folder's local ID
+ORDER BY m.sent_unix DESC;
+```
+
+Membership describes **observed cached records**, not guaranteed current server
+location. Merged revisions can contribute multiple folders; unknown membership
+has no link. The catalog can include virtual, calendar and internal folders, and
+identically named folders have separate IDs. Zero recovered messages does not
+mean the server folder is empty. Conflicting cached names produce a NULL name.
+Folder extraction is currently verified against a macOS version `i` snapshot;
+unsupported layouts remain unlinked. See SPEC.md §6.3 for the byte-level evidence.
+
 ## Windows stores
 
 Untested. The macOS build writes version byte `'i'`; `HxCore` also carries

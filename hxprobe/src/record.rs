@@ -27,6 +27,8 @@ pub struct Record {
     pub sender: Option<String>,
     pub sender_name: Option<String>,
     pub recipients: Vec<String>,
+    /// Folder keys observed across cached revisions; this is not a live view.
+    pub folder_ids: std::collections::BTreeSet<u64>,
     pub subject: Option<String>,
     pub message_id: Option<String>,
     /// Plain text, tags stripped and entities decoded.
